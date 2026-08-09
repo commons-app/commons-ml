@@ -51,16 +51,25 @@ fi
    "onnxruntime==${ORT_PYTHON_VERSION}"
 
 MODEL_DIR="${ROOT_DIR}/library/src/main/assets/models"
+CONVERTED_MODEL_DIR="$(mktemp -d)"
+trap 'rm -rf "${CONVERTED_MODEL_DIR}"' EXIT
+mkdir -p "${MODEL_DIR}"
+# Remove intermediates from older versions of this script. These filenames are
+# generated exclusively by the ORT converter and are never loaded by the app.
+rm -f "${MODEL_DIR}"/*.required_operators*.config "${MODEL_DIR}"/*.with_runtime_opt.ort 2>/dev/null || true
 for model in "${ROOT_DIR}"/tools/source_models/*.onnx; do
   model_name="$(basename "${model}")"
   "${PY_ENV}/bin/python" -m onnxruntime.tools.convert_onnx_models_to_ort \
-    "${model}" --output_dir "${MODEL_DIR}"
-  generated="${MODEL_DIR}/${model_name%.onnx}.ort"
+    "${model}" --output_dir "${CONVERTED_MODEL_DIR}"
+  generated="${CONVERTED_MODEL_DIR}/${model_name%.onnx}.ort"
   test -f "${generated}" || { echo "Missing converted model: ${generated}" >&2; exit 1; }
+  # The converter also emits runtime-optimized variants and operator configs.
+  # Those are build intermediates, not runtime assets consumed by the library.
+  cp "${generated}" "${MODEL_DIR}/"
 done
 
 "${PY_ENV}/bin/python" "${ORT_DIR}/tools/python/create_reduced_build_config.py" \
-  --format ORT "${MODEL_DIR}" "${OPS_CONFIG}"
+  --format ORT "${CONVERTED_MODEL_DIR}" "${OPS_CONFIG}"
 sed -i.bak '/^#/d' "${OPS_CONFIG}"
 rm -f "${OPS_CONFIG}.bak"
 
@@ -97,7 +106,7 @@ BUILD_ARGS+=(--cmake_extra_defines \
 RUNTIME_JAR_DEST="${ROOT_DIR}/library/libs/onnxruntime-android-1.22.0-reduced.jar"
 JNI_DEST="${ROOT_DIR}/library/src/main/jniLibs"
 MERGE_DIR="$(mktemp -d)"
-trap 'rm -rf "${MERGE_DIR}"' EXIT
+trap 'rm -rf "${MERGE_DIR}" "${CONVERTED_MODEL_DIR}"' EXIT
 for ABI in armeabi-v7a arm64-v8a; do
   ABI_BUILD_DIR="${ORT_DIR}/build-${ABI}"
   PATH="${PY_ENV}/bin:${PATH}" "${ORT_DIR}/build.sh" \
