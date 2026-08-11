@@ -61,7 +61,7 @@ class OnnxYuNetDetector internal constructor(
         checkOpen()
         val threshold = options.confidenceThreshold
         val regions =
-            plateRegions(source)
+            chunkRegions(source)
         val detections = regions.flatMap { region ->
             val crop = Bitmap.createBitmap(source, region.left, region.top, region.width, region.height)
             try {
@@ -298,7 +298,7 @@ class OnnxYuNetDetector internal constructor(
      * Because each chunk is small, minimal downsampling occurs when resized to the model's 320×240 input,
      * allowing the model to detect small license plates easily.
      */
-    private fun plateRegions(source: Bitmap): List<InferenceRegion> {
+    private fun chunkRegions(source: Bitmap): List<InferenceRegion> {
         val chunkWidth = min(source.width, inputWidth * CHUNK_SCALE_FACTOR)
         val chunkHeight = min(source.height, inputHeight * CHUNK_SCALE_FACTOR)
 

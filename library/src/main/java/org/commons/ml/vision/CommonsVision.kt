@@ -22,7 +22,7 @@ private const val TAG = "CommonsVision"
  * coroutine dispatcher.
  */
 class CommonsVision(context: Context) : AutoCloseable {
-    private val detector: AiDetector = CombinedDetector(context.applicationContext)
+    private val detector: AiDetector = Detector(context.applicationContext)
 
     suspend fun detect(
         bitmap: Bitmap,
@@ -33,7 +33,7 @@ class CommonsVision(context: Context) : AutoCloseable {
         detector.close()
     }
 
-    private class CombinedDetector(
+    private class Detector(
         context: Context
     ) : AiDetector {
         private val runtime: ModelRuntime = OrtRuntime(context)
