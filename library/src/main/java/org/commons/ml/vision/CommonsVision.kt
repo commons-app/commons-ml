@@ -40,11 +40,13 @@ class CommonsVision(context: Context) : AutoCloseable {
         private val face: AiDetector?
         private val plate: AiDetector?
         private val plateInitializationError: MlRuntimeException?
+        private val faceInitializationError: MlRuntimeException?
         private var closed = false
 
         init {
             val faceResult = openDetector(runtime, DetectorKind.FACE)
             face = faceResult.first
+            faceInitializationError = faceResult.second
 
             val plateResult = openDetector(runtime, DetectorKind.LICENSE_PLATE)
             plate = plateResult.first
@@ -53,20 +55,22 @@ class CommonsVision(context: Context) : AutoCloseable {
 
         override suspend fun detect(bitmap: Bitmap, options: DetectionOptions): DetectionResult {
             checkOpen()
-            val faceResult = try {
-                face?.detect(bitmap, options)
-                    ?: return DetectionResult.Unavailable("Face detection is unavailable.")
-            } catch (error: MlRuntimeException) {
-                Log.e(TAG, "Face detection failed (${error.code}).", error)
-                return DetectionResult.Unavailable(
-                    "Face detection unavailable (${error.code}): ${error.message}"
-                )
-            }
-
-            val faces = when (faceResult) {
-                is DetectionResult.Success -> faceResult.detections
-                is DetectionResult.Partial -> faceResult.detections
-                is DetectionResult.Unavailable -> return faceResult
+            val faces = if (face == null) {
+                faceInitializationError?.let {
+                    Log.e(TAG, "Face detector unavailable (${it.code}).", it)
+                }
+                emptyList()
+            } else {
+                try {
+                    when (val faceResult = face.detect(bitmap, options)) {
+                        is DetectionResult.Success -> faceResult.detections
+                        is DetectionResult.Partial -> faceResult.detections
+                        is DetectionResult.Unavailable -> return faceResult
+                    }
+                } catch (error: MlRuntimeException) {
+                    Log.e(TAG, "Face detection failed (${error.code}).", error)
+                    emptyList()
+                }
             }
 
             val plates = if (plate == null) {
