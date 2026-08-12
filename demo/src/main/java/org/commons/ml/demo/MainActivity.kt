@@ -1,44 +1,56 @@
 package org.commons.ml.demo
 
-import org.commons.ml.common.*
+import org.commons.ml.common.DetectionOptions
+import org.commons.ml.common.DetectionResult
+import org.commons.ml.common.DetectionType
 import org.commons.ml.vision.CommonsVision
 
-import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
-import android.graphics.drawable.ColorDrawable
 import android.widget.ImageView
-import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.Alignment
 
-/** Standalone benchmark and redaction POC for local face and plate detection. */
+/** Standalone demo for local face and license-plate detection. */
 class MainActivity : ComponentActivity() {
     private lateinit var imageView: ImageView
     private lateinit var overlay: DetectionOverlayView
-    private lateinit var status: TextView
     private var bitmap: Bitmap? = null
     private var sourceUri: Uri? = null
     private var detector: CommonsVision? = null
-    private var threshold = 0.5f
     private var thresholdState by mutableFloatStateOf(0.5f)
     private var statusMessage by mutableStateOf("")
 
@@ -84,7 +96,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildUi() {
-        status = TextView(this)
         setContent {
             MaterialTheme {
                 Scaffold { padding ->
@@ -107,7 +118,7 @@ class MainActivity : ComponentActivity() {
                         Text("Confidence threshold: ${(thresholdState * 100).toInt()}")
                         Slider(
                             value = thresholdState,
-                            onValueChange = { thresholdState = it; threshold = it },
+                            onValueChange = { thresholdState = it },
                             valueRange = 0.05f..0.95f,
                             onValueChangeFinished = { if (bitmap != null) detect() },
                             modifier = Modifier.fillMaxWidth()
@@ -151,7 +162,7 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 withContext(Dispatchers.Default) {
                     val started = System.nanoTime()
-                    val options = DetectionOptions(confidenceThreshold = threshold)
+                    val options = DetectionOptions(confidenceThreshold = thresholdState)
                     val result = getDetector().detect(source, options)
                     Pair(result, (System.nanoTime() - started) / 1_000_000)
                 }
@@ -159,7 +170,11 @@ class MainActivity : ComponentActivity() {
                 val detections = when (val value = result.first) {
                     is DetectionResult.Success -> value.detections
                     is DetectionResult.Partial -> value.detections
-                    is DetectionResult.Unavailable -> emptyList()
+                    is DetectionResult.Unavailable -> {
+                        overlay.setDetections(emptyList())
+                        setStatus("Detection unavailable: ${value.reason}")
+                        return@onSuccess
+                    }
                 }
                 overlay.setDetections(detections)
                 setStatus(String.format(
@@ -190,14 +205,13 @@ class MainActivity : ComponentActivity() {
 
     private fun setStatus(message: String) {
         statusMessage = message
-        if (::status.isInitialized) status.text = message
     }
 
     private fun applyRedaction() {
         val source = bitmap ?: return
         val regions = overlay.getDetections().map { it.bounds }
         if (regions.isEmpty()) {
-            setStatus("No regions selected. Run detection or draw boxes in a later POC iteration.")
+            setStatus("No regions selected. Run detection or draw boxes in a future iteration.")
             return
         }
         val redacted = source.copy(Bitmap.Config.ARGB_8888, true)

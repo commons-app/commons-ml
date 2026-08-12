@@ -1,7 +1,7 @@
 package org.commons.ml.common
 
-import android.graphics.RectF
 import android.graphics.Bitmap
+import android.graphics.RectF
 
 /** Low-level detector contract used by the library facade. */
 interface AiDetector : AutoCloseable {

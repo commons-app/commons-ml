@@ -17,7 +17,12 @@ android {
     kotlinOptions.jvmTarget = "17"
 }
 
-fun MavenPom.configureCommonsAiMetadata() {
+dependencies {
+    implementation(files("libs/onnxruntime-android-1.22.0-reduced.jar"))
+    testImplementation(kotlin("test"))
+}
+
+fun MavenPom.configureCommonsMlMetadata() {
     name.set("Commons ML")
     description.set("Android library for on-device face and license-plate detection.")
     url.set("https://github.com/commons-app/commons-ml")
@@ -42,14 +47,9 @@ fun MavenPom.configureCommonsAiMetadata() {
     }
 }
 
-dependencies {
-    implementation(files("libs/onnxruntime-android-1.22.0-reduced.jar"))
-    testImplementation(kotlin("test"))
-}
-
 mavenPublishing {
     coordinates("io.github.commons-app", "commons-ml", libraryVersion)
     pom {
-        configureCommonsAiMetadata()
+        configureCommonsMlMetadata()
     }
 }

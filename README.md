@@ -1,183 +1,118 @@
-# Commons ML Android library and ajpegtran demo
+# Commons ML
 
-Android library for local face and license-plate suggestions, with a standalone demo app.
+Commons ML is a standard Android library for on-device face and license-plate
+detection, plus a small Android demo for reviewing detections. It is Android-only
+by design; the repository does not use Kotlin Multiplatform.
 
-<img width="1080" height="2400" alt="Screenshot_20260802_141816" src="https://github.com/user-attachments/assets/21fdb4aa-0423-4f22-9cb0-6a01eb195043" />
+## Modules
 
+- `library` - reusable Android library with the public detection contract and
+  bundled ONNX Runtime YuNet backends.
+- `demo` - standalone Android application that exercises the library and shows
+  optional ajpegtran-based JPEG export.
+- `tools` - reproducible model conversion and native-runtime maintenance scripts.
 
-## Library structure
+The stale `app`, `benchmark`, and `commons-ai` modules are intentionally not part
+of the repository.
 
-The publishable `library` module is one artifact with internal package boundaries:
+## Using the library
 
-- `common`: public generic detection contract.
-- `runtime`: internal ONNX Runtime lifecycle.
-- `vision`: internal YuNet and legacy face fallback implementations.
-- `demo`: application UI, manual review, and the ajpegtran-facing export path.
-
-Consumers depend only on `io.github.commons-app:commons-ml:0.1.0` and use the stable facade API:
+Create one `CommonsVision` instance for the lifetime of the screen or owner and
+close it when that owner is destroyed:
 
 ```kotlin
 val vision = CommonsVision(context)
-val result = vision.detect(bitmap, DetectionOptions())
-when (result) {
-    is DetectionResult.Success -> use(result.detections)
-    is DetectionResult.Partial -> showUnsupported(result.skipped)
-    is DetectionResult.Unavailable -> showError(result.reason)
-}
-vision.close()
-```
-
-`detect` is suspend and must run from a coroutine. `Detection.bounds` are axis-aligned
-pixel coordinates in the exact bitmap supplied; do not scale the bitmap between detection
-and ajpegtran conversion. On API 24+, ONNX Runtime provides face and INT8 LPD-YuNet
-plate detection. Below API 24, face detection uses `MediaFaceDetector` and plates are
-reported explicitly in `Partial.skipped`.
-The library does not depend on ajpegtran and does not apply blur or pixelation.
-
-### Connecting detections to ajpegtran
-
-Consumers can decode an image with known dimensions, then map each `Detection.bounds` to
-integer `left/top/width/height` values in the original JPEG coordinate space.
-Map them to ajpegtran's `BlurRegion(width, height, cornerX, cornerY,
-blockWidth, blockHeight, aligned)` and call `Jpegtran.blur(regions)`, followed by
-`save(destinationUri)`. `Jpegtran` manages its native file descriptors and
-temporary files; callers should call `cleanup()` after saving.
-
-The demo's `Ajpegtran` adapter uses the same high-level ajpegtran API consumed by Commons. Add the upstream
-native module from [commons-app/ajpegtran](https://github.com/commons-app/ajpegtran)
-to the app build, then call:
-
-```kotlin
-val jpegtran = Jpegtran(context, inputUri)
 try {
-    jpegtran.blur(regions)
-    jpegtran.save(outputUri)
+    val result = vision.detect(bitmap, DetectionOptions())
+    when (result) {
+        is DetectionResult.Success -> consume(result.detections)
+        is DetectionResult.Partial -> showUnsupported(result.skipped)
+        is DetectionResult.Unavailable -> showError(result.reason)
+    }
 } finally {
-    jpegtran.cleanup()
+    vision.close()
 }
 ```
 
-The demo uses `Uri` values with ajpegtran's high-level API and runs the native transformation
-on `Dispatchers.IO`, displaying both success and native-error states. The library has no
-ajpegtran dependency and never applies blur or pixelization.
+`detect` is suspendable and should run from a coroutine on a worker dispatcher.
+Detection bounds are pixel coordinates in the exact bitmap supplied. The library
+does not depend on ajpegtran and does not blur or pixelate images.
 
-## Current implementation
+Face and plate detection use the bundled reduced ONNX Runtime on all supported
+Android API levels, including API 21. Runtime failures are represented by typed
+`MlRuntimeException` subclasses and are logged with a stable error code.
 
-- Library minSdk 21. API 24+ uses ONNX Runtime for face and INT8 plate detection.
-- API 21-23 uses `MediaFaceDetector` for faces and reports plates as unsupported.
-- OpenCV Zoo YuNet face detector.
-- OpenCV Zoo LPD-YuNet license-plate detector.
-- Model-specific ONNX preprocessing and output decoders.
-- Fixed-size overlapping crops for plate detection, mapped back to source coordinates.
-- Manual box dragging/deletion and local pixelation preview.
+## Architecture
 
-The POC uses ONNX Runtime directly and does not bundle OpenCV's full Android DNN runtime.
-The demo's **Export JPEG** action uses the ajpegtran adapter for lossless JPEG
-redaction; **Redact** remains a bitmap preview for manual review.
+The library keeps the detection domain separate from the Android inference
+runtime:
 
-The current one-face/one-plate comparison is in
-[`benchmark/runtime-comparison.md`](benchmark/runtime-comparison.md). Model provenance,
-checksums, and upstream licensing are in
-[`library/src/main/assets/models/README.md`](library/src/main/assets/models/README.md).
+- `common` contains the public detection contract and validation types.
+- `vision` contains model metadata, image preprocessing, output decoding,
+  crop planning, geometry, and non-maximum suppression.
+- `runtime` contains the internal `ModelRuntime`/`ModelSession` boundary and
+  the ONNX Runtime implementation. Vision code never imports ONNX Runtime
+  classes, so another Android engine can replace this backend without changing
+  the detection contract.
+
+Runtime sessions are tracked by `OrtRuntime`, closed idempotently, and released
+even when one detector fails during cleanup. Calling detection after closing the
+facade raises `RuntimeClosedException`.
 
 ## Build and publish
 
-Configure an Android SDK in `local.properties` or `ANDROID_HOME`, and use JDK 17
-(`JAVA_HOME`) for the Android Gradle build. JDK 24 can fail AGP’s `jlink` transform
-of `core-for-system-modules.jar`. Then run:
+Use JDK 17, Android SDK 36, NDK 28.2.13676358, and CMake 4.1.2:
 
 ```bash
-./gradlew :demo:assembleDebug
+export JAVA_HOME=/path/to/jdk-17
+./gradlew :library:test
 ./gradlew :library:assembleRelease
+./gradlew :demo:assembleDebug
 ./gradlew :library:publishToMavenLocal -PsignAllPublications=false
 ```
 
-The library uses Maven coordinates `io.github.commons-app:commons-ml:0.1.0`; consume the local
-artifact with `mavenLocal()` and one dependency:
+The demo uses `arm64-v8a` native libraries from the library dependency. To verify
+16 KB native alignment after building an artifact:
 
-```kotlin
-implementation("io.github.commons-app:commons-ml:0.1.0")
+```bash
+tools/verify_native_alignment.sh library/build/outputs/aar/library-release.aar
 ```
 
-The published AAR contains the reduced ONNX Runtime Java classes and native libraries, so
-consumers declare only the `commons-ml` dependency.
+The library uses Maven coordinates
+`io.github.commons-app:commons-ml:0.1.0`. Maven Central publishing and signing
+remain configured through the Vanniktech plugin; provide credentials in CI before
+releasing. This cleanup does not publish artifacts automatically.
 
-Maven Central publishing and signing are configured through the same Vanniktech plugin used
-by ajpegtran. Provide the Central Portal and signing credentials in CI before releasing.
+## Model provenance
 
-Use JDK 17, Android SDK 36, NDK 27.2.12479018, and CMake 3.22.1. Run size and benchmark
-reports from `benchmark/`. Verify packaged native objects with `llvm-readelf -l` and
-confirm every `LOAD` segment alignment is compatible with 16 KB pages. If Gradle fails,
-report the exact task and complete error output.
+The bundled models are converted ORT files derived from the OpenCV Zoo sources.
+The original ONNX files remain under `tools/source_models/` for auditability and
+reproducible conversion. See
+[`library/src/main/assets/models/README.md`](library/src/main/assets/models/README.md)
+for source URLs, licenses, checksums, and the active model inventory.
 
-## Adding a model
-
-Add the model under the appropriate internal asset directory and record its source URL,
-license, checksum, input dimensions, tensor layout, preprocessing, output tensors, and
-decoder. Add a model descriptor, backend decoder, typed detection capability, fixture
-images and expected cases; measure accuracy, latency, memory, and packaged size. Decide
-whether it is bundled, optional, or benchmark-only, update the model inventory and
-provenance, and add release notes. A model returning the generic contract does not require
-Commons UI or ajpegtran changes.
-
-## Optional reduced ONNX Runtime build
-
-The app loads ORT-format versions of the source ONNX models. The original ONNX
-files are preserved under `tools/source_models/` for provenance, while only the
-converted `.ort` files under `library/src/main/assets/models/` are packaged. Conversion
-preserves their graphs while saving optimization results
-for a smaller mobile runtime. The build script converts source ONNX models to `.ort`,
-regenerates the operator config from those `.ort` files, and extracts the generated Java
-classes to `library/libs/` and native libraries to `library/src/main/jniLibs/`. To reproduce
-the native build, install
-Git, Python 3, the Android SDK/NDK, and CMake, then run:
+To regenerate ORT assets and the reduced runtime, install Python 3, Git, the
+Android SDK/NDK, and CMake, then run:
 
 ```bash
 tools/build_reduced_onnxruntime.sh
 ```
 
-The script pins ONNX Runtime `v1.22.0`, creates a temporary Python environment,
-installs the model-analysis dependencies, and builds Java bindings for `armeabi-v7a` and
-`arm64-v8a`.
-It uses the official `--minimal_build` flow because the app loads ORT-format files.
-The script fetches Eigen commit `1d8b82b0740839c0de7f1242a3585e3390ff5f33`; this
-works around the stale Eigen archive checksum currently encountered by the upstream
-build. The generated
-`libonnxruntime.so` and `libonnxruntime4j_jni.so` are embedded in the published
-`commons-ml` AAR. Verify the release AAR and APK, detector behavior, ELF alignment, and
-ZIP/page alignment with
-`tools/verify_native_alignment.sh`.
+The script is maintenance tooling, not part of a normal application build. It
+passes `--hash-style=both` to the native linker so the bundled libraries retain
+the legacy `DT_HASH` table required by API 21 while also keeping `DT_GNU_HASH`
+for newer Android releases. The native alignment verifier checks this
+compatibility in addition to 16 KB `LOAD` segment alignment.
 
-Run the verifier against both the release library AAR and the final demo APK:
+## Contributing
 
-```bash
-tools/verify_native_alignment.sh library/build/outputs/aar/library-release.aar
-tools/verify_native_alignment.sh demo/build/outputs/apk/release/demo-release.apk
-```
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
+Security reports should follow [`SECURITY.md`](SECURITY.md). CI runs JDK 17
+library tests and Android debug/release compilation for every push and pull
+request.
 
-The APK check is the authoritative Play-packaging check; AAR verification checks the
-published library artifact.
+## License
 
-For a new ONNX model, preserve the original under `tools/source_models/`; the build script
-converts it with `python -m onnxruntime.tools.convert_onnx_models_to_ort` and packages the
-generated `.ort`. Record checksums for both files. Use `.ort` for ONNX Runtime-only
-reduced builds; retain `.onnx` when interoperability or runtime comparisons are required.
-
-## Evaluation
-
-The pinned evaluation corpus and measurement requirements are documented in
-[`benchmark/README.md`](benchmark/README.md). The app is a benchmark harness, not a complete
-privacy-redaction product: detection recall, false positives, latency, memory, and coordinate
-mapping must be evaluated on real Commons images before integration.
-
-## Limitations
-
-- LPD-YuNet was trained primarily on Chinese plates; recall may be poor for other regions.
-- The bundled plate graph has fixed input dimensions, so wide images use overlapping crops.
-- Adding a new model family requires a model adapter for its input/output contract.
-- These models cover faces and plates only; they do not implement the other future ML use cases.
-
-## Licensing
-
-POC application code is MIT-licensed. Model files and reused upstream decoder logic retain
-their own licenses; consult the model README before redistribution.
+The library and demo source are MIT-licensed. Bundled models and reused decoder
+logic retain their upstream licenses; consult the model provenance document
+before redistribution.

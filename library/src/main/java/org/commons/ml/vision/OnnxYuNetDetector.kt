@@ -1,20 +1,17 @@
 package org.commons.ml.vision
 
-import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.PointF
 import android.graphics.RectF
-import android.media.FaceDetector
 import android.util.Log
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtSession
-import ai.onnxruntime.TensorInfo
-import java.nio.FloatBuffer
 import org.commons.ml.common.Detection
 import org.commons.ml.common.DetectionOptions
 import org.commons.ml.common.DetectionResult
-import org.commons.ml.runtime.OrtRuntime
+import org.commons.ml.runtime.ModelInput
+import org.commons.ml.runtime.MlRuntimeException
+import org.commons.ml.runtime.ModelLoadException
+import org.commons.ml.runtime.ModelRuntime
+import org.commons.ml.runtime.ModelSession
+import org.commons.ml.runtime.RuntimeClosedException
 import kotlin.math.ceil
 import kotlin.math.exp
 import kotlin.math.max
@@ -30,42 +27,41 @@ import kotlin.math.sqrt
  * has SSD-style loc/conf/iou outputs and four corner points per detection.
  */
 class OnnxYuNetDetector internal constructor(
-    context: Context,
+    runtime: ModelRuntime,
     private val kind: DetectorKind
 ) : Detector {
-    private val runtime = OrtRuntime(context)
-    private val environment = runtime.environment
-    private lateinit var session: OrtSession
-    private var inputWidth: Int = kind.inputWidth
-    private var inputHeight: Int = kind.inputHeight
+    private val session: ModelSession = runtime.openSession(kind.assetName)
+    private val inputWidth: Int
+    private val inputHeight: Int
+    private var closed = false
 
     init {
         try {
-            val assetFileName = kind.assetName.substringAfterLast('/')
-            val bundledModels = context.assets.list("models")?.toList().orEmpty()
-            require(assetFileName in bundledModels) {
-                "Missing model asset '${kind.assetName}'. Bundled models: ${bundledModels.joinToString()}"
+            val shape = session.inputShape
+            if (shape.size != 4) {
+                throw ModelLoadException(
+                    kind.assetName,
+                    "expected NCHW model input, got ${shape.contentToString()}"
+                )
             }
-            session = runtime.openSession(kind.assetName)
-            val inputInfo = session.inputInfo.values.first().info as TensorInfo
-            val shape = inputInfo.shape
-            require(shape.size == 4) { "Expected NCHW model input, got ${shape.contentToString()}" }
             inputHeight = shape[2].takeIf { it > 0 }?.toInt() ?: kind.inputHeight
             inputWidth = shape[3].takeIf { it > 0 }?.toInt() ?: kind.inputWidth
-        } catch (error: Exception) {
-            Log.w("FaceDetector", "Unable to initialize ${kind.detectionType} ONNX detector", error)
+        } catch (error: MlRuntimeException) {
+            try {
+                session.close()
+            } catch (closeError: MlRuntimeException) {
+                error.addSuppressed(closeError)
+            }
+            throw error
         }
     }
 
     /** Detects faces or plates and maps model coordinates back to the source bitmap. */
     override suspend fun detect(source: Bitmap, options: DetectionOptions): DetectionResult {
+        checkOpen()
         val threshold = options.confidenceThreshold
-        if (kind == DetectorKind.FACE && !::session.isInitialized) {
-            Log.w("FaceDetector", "YuNet is unavailable; using platform FaceDetector")
-            return DetectionResult.Success(detectPlatformFaces(source, threshold).take(options.maximumResults))
-        }
         val regions =
-            plateRegions(source)
+            chunkRegions(source)
         val detections = regions.flatMap { region ->
             val crop = Bitmap.createBitmap(source, region.left, region.top, region.width, region.height)
             try {
@@ -83,43 +79,7 @@ class OnnxYuNetDetector internal constructor(
             }
         }
         val result = nonMaximumSuppression(detections).take(options.maximumResults)
-        if (kind == DetectorKind.FACE && result.isEmpty()) {
-            Log.w("FaceDetector", "YuNet returned no faces; trying platform FaceDetector")
-            return DetectionResult.Success(detectPlatformFaces(source, threshold).take(options.maximumResults))
-        }
         return DetectionResult.Success(result)
-    }
-
-    private fun detectPlatformFaces(source: Bitmap, threshold: Float): List<Detection> {
-        var width = source.width
-        if (width % 2 != 0) width--
-        if (width <= 0 || source.height <= 0) return emptyList()
-        val rgb565 = Bitmap.createBitmap(width, source.height, Bitmap.Config.RGB_565)
-        return try {
-            Canvas(rgb565).drawBitmap(source, 0f, 0f, null)
-            val detector = FaceDetector(width, source.height, 100)
-            val faces = arrayOfNulls<FaceDetector.Face>(100)
-            val count = detector.findFaces(rgb565, faces)
-            (0 until count).mapNotNull { index ->
-                val face = faces[index] ?: return@mapNotNull null
-                val confidence = face.confidence()
-                if (confidence < threshold) return@mapNotNull null
-                val midpoint = PointF()
-                face.getMidPoint(midpoint)
-                val distance = face.eyesDistance()
-                val bounds = RectF(
-                    midpoint.x - distance * 1.35f,
-                    midpoint.y - distance * 1.65f,
-                    midpoint.x + distance * 1.35f,
-                    midpoint.y + distance * 1.85f
-                )
-                bounds.intersect(0f, 0f, source.width.toFloat(), source.height.toFloat())
-                if (bounds.width() <= 1f || bounds.height() <= 1f) null
-                else Detection(kind.detectionType, confidence, bounds)
-            }
-        } finally {
-            rgb565.recycle()
-        }
     }
 
     private fun detectRegion(source: Bitmap, threshold: Float): List<Detection> {
@@ -146,32 +106,30 @@ class OnnxYuNetDetector internal constructor(
                 }
             }
 
-            OnnxTensor.createTensor(
-                environment,
-                FloatBuffer.wrap(input),
+        val outputs = session.run(
+            ModelInput(
+                input,
                 longArrayOf(1, 3, inferenceHeight.toLong(), inferenceWidth.toLong())
-            ).use { tensor ->
-                session.run(mapOf(session.inputNames.first() to tensor)).use { result ->
-                    val outputs = session.outputNames.mapIndexedNotNull { index, name ->
-                        (result[index] as? OnnxTensor)?.let { Output(name, it.readFloatArray()) }
-                    }
-                    if (kind == DetectorKind.LICENSE_PLATE) {
-                        Log.d("PlateDetector", "ONNX outputs: ${outputs.joinToString { "${it.name}=${it.size}" }}, threshold=$threshold")
-                    }
-                    return if (kind == DetectorKind.LICENSE_PLATE) {
-                        decodeLicensePlates(
-                            outputs,
-                            source.width,
-                            source.height,
-                            inferenceWidth,
-                            inferenceHeight,
-                            threshold
-                        )
-                    } else {
-                        decodeFaces(outputs, source.width, source.height, inferenceWidth, inferenceHeight, threshold)
-                    }
-                }
-            }
+            )
+        ).map { Output(it.name, it.values) }
+        if (kind == DetectorKind.LICENSE_PLATE) {
+            Log.d(
+                "PlateDetector",
+                "ONNX outputs: ${outputs.joinToString { "${it.name}=${it.size}" }}, threshold=$threshold"
+            )
+        }
+        return if (kind == DetectorKind.LICENSE_PLATE) {
+            decodeLicensePlates(
+                outputs,
+                source.width,
+                source.height,
+                inferenceWidth,
+                inferenceHeight,
+                threshold
+            )
+        } else {
+            decodeFaces(outputs, source.width, source.height, inferenceWidth, inferenceHeight, threshold)
+        }
         } finally {
             if (resized !== source) resized.recycle()
         }
@@ -340,7 +298,7 @@ class OnnxYuNetDetector internal constructor(
      * Because each chunk is small, minimal downsampling occurs when resized to the model's 320×240 input,
      * allowing the model to detect small license plates easily.
      */
-    private fun plateRegions(source: Bitmap): List<InferenceRegion> {
+    private fun chunkRegions(source: Bitmap): List<InferenceRegion> {
         val chunkWidth = min(source.width, inputWidth * CHUNK_SCALE_FACTOR)
         val chunkHeight = min(source.height, inputHeight * CHUNK_SCALE_FACTOR)
 
@@ -387,11 +345,13 @@ class OnnxYuNetDetector internal constructor(
     }
 
     override fun close() {
+        if (closed) return
+        closed = true
         session.close()
     }
 
-    private fun OnnxTensor.readFloatArray(): FloatArray = floatBuffer.let { buffer ->
-        FloatArray(buffer.remaining()).also(buffer::get)
+    private fun checkOpen() {
+        if (closed) throw RuntimeClosedException()
     }
 
     private data class Output(val name: String, private val values: FloatArray) {
