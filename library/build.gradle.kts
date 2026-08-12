@@ -39,6 +39,11 @@ fun MavenPom.configureCommonsMlMetadata() {
             name.set("Ritika Pahwa")
             url.set("https://github.com/RitikaPahwa4444")
         }
+        developer {
+            id.set("rovertrack")
+            name.set("Rishan")
+            url.set("https://github.com/rovertrack")
+        }
     }
     scm {
         url.set("https://github.com/commons-app/commons-ml")
