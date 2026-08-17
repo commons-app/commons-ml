@@ -5,7 +5,11 @@ import android.graphics.RectF
 
 /** Low-level detector contract used by the library facade. */
 interface AiDetector : AutoCloseable {
-    suspend fun detect(bitmap: Bitmap, options: DetectionOptions = DetectionOptions()): DetectionResult
+    suspend fun detect(
+        bitmap: Bitmap,
+        options: DetectionOptions = DetectionOptions(),
+        progressListener: DetectionProgressListener? = null
+    ): DetectionResult
 }
 
 /** Result of running all detector capabilities available on the device. */

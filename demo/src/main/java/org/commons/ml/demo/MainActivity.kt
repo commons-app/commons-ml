@@ -1,5 +1,6 @@
 package org.commons.ml.demo
 
+import android.app.AlertDialog
 import org.commons.ml.common.DetectionOptions
 import org.commons.ml.common.DetectionResult
 import org.commons.ml.common.DetectionType
@@ -13,7 +14,10 @@ import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.view.LayoutInflater
 import android.widget.ImageView
+import android.widget.ProgressBar
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -40,9 +44,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
 
 /** Standalone demo for local face and license-plate detection. */
 class MainActivity : ComponentActivity() {
@@ -54,40 +60,10 @@ class MainActivity : ComponentActivity() {
     private var thresholdState by mutableFloatStateOf(0.5f)
     private var statusMessage by mutableStateOf("")
 
-    private val createRedactedImage =
-        registerForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
-            val source = sourceUri
-            val regions = overlay.getDetections()
-            if (uri == null || source == null || regions.isEmpty()) return@registerForActivityResult
-            lifecycleScope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    runCatching {
-                        Ajpegtran.pixelize(
-                                    this@MainActivity,
-                                    source,
-                                    uri,
-                                    regions.map {
-                                        val bounds = RectF(it.bounds).apply {
-                                            inset(-width() * 0.12f, -height() * 0.12f)
-                                        }
-                                        Ajpegtran.PixelizeRegion(
-                                            bounds.left.toInt().coerceAtLeast(0),
-                                            bounds.top.toInt().coerceAtLeast(0),
-                                            bounds.width().toInt().coerceAtLeast(1),
-                                            bounds.height().toInt().coerceAtLeast(1)
-                                        )
-                                    }
-                                ).getOrThrow()
-                    }
-                }
-                result.onSuccess { setStatus("Saved ajpegtran-redacted JPEG.") }
-                    .onFailure { setStatus("ajpegtran failed: ${diagnosticMessage(it)}") }
-            }
+    private val openImage =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let { loadImage(it) }
         }
-
-    private val openImage = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { loadImage(it) }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -159,14 +135,44 @@ class MainActivity : ComponentActivity() {
         }
         setStatus("Running ONNX Runtime locally…")
         lifecycleScope.launch {
+            val dialogView = LayoutInflater.from(this@MainActivity)
+                .inflate(R.layout.dialog, null)
+            val titleView = dialogView.findViewById<TextView>(R.id.autodetect_title)
+            val descView = dialogView.findViewById<TextView>(R.id.autodetect_description)
+            val percentView = dialogView.findViewById<TextView>(R.id.autodetect_percent)
+            val progressBar = dialogView.findViewById<ProgressBar>(R.id.autodetect_progress)
+
+            titleView?.text = "Auto-blurring faces and license plates."
+            descView?.text = "You can discard false positives using the ❌ button of each blurring area."
+            percentView?.text = "0%"
+            progressBar?.progress = 0
+
+            val progressDialog = AlertDialog.Builder(this@MainActivity)
+                .setView(dialogView)
+                .setCancelable(false)
+                .create()
+            progressDialog.show()
+
             runCatching {
                 withContext(Dispatchers.Default) {
                     val started = System.nanoTime()
                     val options = DetectionOptions(confidenceThreshold = thresholdState)
-                    val result = getDetector().detect(source, options)
+                    val result = getDetector().detect(source, options) { progress ->
+                        launch(Dispatchers.Main) {
+                            val percent = (progress * 100).toInt()
+                            progressBar?.progress = percent
+                            percentView?.text = "$percent%"
+                        }
+                    }
                     Pair(result, (System.nanoTime() - started) / 1_000_000)
                 }
             }.onSuccess { result ->
+                // Ensure 100% is displayed and give a brief delay so the user can comfortably read it
+                progressBar?.progress = 100
+                percentView?.text = "100%"
+                delay(700.milliseconds)
+                progressDialog.dismiss()
+
                 val detections = when (val value = result.first) {
                     is DetectionResult.Success -> value.detections
                     is DetectionResult.Partial -> value.detections
@@ -177,15 +183,18 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 overlay.setDetections(detections)
-                setStatus(String.format(
-                    Locale.US,
-                    "Detected %d regions (%d faces, %d plates) in %d ms. Tap/drag boxes; delete false positives.",
-                    detections.size,
-                    detections.count { it.type == DetectionType.FACE },
-                    detections.count { it.type == DetectionType.LICENSE_PLATE },
-                    result.second
-                ))
+                setStatus(
+                    String.format(
+                        Locale.US,
+                        "Detected %d regions (%d faces, %d plates) in %d ms. Tap/drag boxes; delete false positives.",
+                        detections.size,
+                        detections.count { it.type == DetectionType.FACE },
+                        detections.count { it.type == DetectionType.LICENSE_PLATE },
+                        result.second
+                    )
+                )
             }.onFailure { error ->
+                progressDialog.dismiss()
                 setStatus("Detection failed: ${diagnosticMessage(error)}")
             }
         }
