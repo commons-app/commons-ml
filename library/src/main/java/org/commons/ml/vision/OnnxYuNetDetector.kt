@@ -5,6 +5,7 @@ import android.graphics.RectF
 import android.util.Log
 import org.commons.ml.common.Detection
 import org.commons.ml.common.DetectionOptions
+import org.commons.ml.common.DetectionProgressListener
 import org.commons.ml.common.DetectionResult
 import org.commons.ml.runtime.ModelInput
 import org.commons.ml.runtime.MlRuntimeException
@@ -57,14 +58,20 @@ class OnnxYuNetDetector internal constructor(
     }
 
     /** Detects faces or plates and maps model coordinates back to the source bitmap. */
-    override suspend fun detect(source: Bitmap, options: DetectionOptions): DetectionResult {
+    override suspend fun detect(
+        source: Bitmap,
+        options: DetectionOptions,
+        progressListener: DetectionProgressListener?
+    ): DetectionResult {
         checkOpen()
         val threshold = options.confidenceThreshold
-        val regions =
-            chunkRegions(source)
-        val detections = regions.flatMap { region ->
+        val regions = chunkRegions(source)
+        val totalChunks = regions.size
+        val allDetections = mutableListOf<Detection>()
+
+        regions.forEachIndexed { index, region ->
             val crop = Bitmap.createBitmap(source, region.left, region.top, region.width, region.height)
-            try {
+            val chunkDetections = try {
                 detectRegion(crop, threshold).map { detection ->
                     detection.copy(
                         bounds = RectF(detection.bounds).apply {
@@ -77,8 +84,14 @@ class OnnxYuNetDetector internal constructor(
                 // Never recycle the caller-owned source image.
                 if (crop !== source) crop.recycle()
             }
+            allDetections += chunkDetections
+            // Calculated from (0.0 to 1.0)
+            // Ex: 1st chunk: 1/4(assume) = 0.25 returned to consumer
+            // which then converts to  0.25*0.50 = 0.125 (12.5% in UI) for individual face or plate progress.
+            progressListener?.onProgress((index + 1).toFloat() / totalChunks)
         }
-        val result = nonMaximumSuppression(detections).take(options.maximumResults)
+
+        val result = nonMaximumSuppression(allDetections).take(options.maximumResults)
         return DetectionResult.Success(result)
     }
 

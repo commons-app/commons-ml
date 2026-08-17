@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import org.commons.ml.common.AiDetector
 import org.commons.ml.common.DetectionOptions
+import org.commons.ml.common.DetectionProgressListener
 import org.commons.ml.common.DetectionResult
 import org.commons.ml.common.DetectionType
 import org.commons.ml.runtime.MlRuntimeException
@@ -26,8 +27,9 @@ class CommonsVision(context: Context) : AutoCloseable {
 
     suspend fun detect(
         bitmap: Bitmap,
-        options: DetectionOptions = DetectionOptions()
-    ): DetectionResult = detector.detect(bitmap, options)
+        options: DetectionOptions = DetectionOptions(),
+        progressListener: DetectionProgressListener? = null
+    ): DetectionResult = detector.detect(bitmap, options, progressListener)
 
     override fun close() {
         detector.close()
@@ -53,8 +55,18 @@ class CommonsVision(context: Context) : AutoCloseable {
             plateInitializationError = plateResult.second
         }
 
-        override suspend fun detect(bitmap: Bitmap, options: DetectionOptions): DetectionResult {
+        override suspend fun detect(
+            bitmap: Bitmap,
+            options: DetectionOptions,
+            progressListener: DetectionProgressListener?
+        ): DetectionResult {
             checkOpen()
+
+            // Face detection takes the first half (0.0 to 0.5) split between any number of chunks.
+            val faceListener = progressListener?.let { listener ->
+                DetectionProgressListener { raw -> listener.onProgress(raw * 0.5f) }
+            }
+
             val faces = if (face == null) {
                 faceInitializationError?.let {
                     Log.e(TAG, "Face detector unavailable (${it.code}).", it)
@@ -62,7 +74,7 @@ class CommonsVision(context: Context) : AutoCloseable {
                 emptyList()
             } else {
                 try {
-                    when (val faceResult = face.detect(bitmap, options)) {
+                    when (val faceResult = face.detect(bitmap, options, faceListener)) {
                         is DetectionResult.Success -> faceResult.detections
                         is DetectionResult.Partial -> faceResult.detections
                         is DetectionResult.Unavailable -> return faceResult
@@ -73,6 +85,11 @@ class CommonsVision(context: Context) : AutoCloseable {
                 }
             }
 
+            // Plate detection takes the second half (0.5 to 1.0) split between any number of chunks.
+            val plateListener = progressListener?.let { listener ->
+                DetectionProgressListener { raw -> listener.onProgress(0.5f + raw * 0.5f) }
+            }
+
             val plates = if (plate == null) {
                 plateInitializationError?.let {
                     Log.e(TAG, "License-plate detector unavailable (${it.code}).", it)
@@ -80,7 +97,7 @@ class CommonsVision(context: Context) : AutoCloseable {
                 emptyList()
             } else {
                 try {
-                    when (val result = plate.detect(bitmap, options)) {
+                    when (val result = plate.detect(bitmap, options, plateListener)) {
                         is DetectionResult.Success -> result.detections
                         is DetectionResult.Partial -> result.detections
                         is DetectionResult.Unavailable -> emptyList()
@@ -90,6 +107,9 @@ class CommonsVision(context: Context) : AutoCloseable {
                     emptyList()
                 }
             }
+
+            // Completion
+            progressListener?.onProgress(1.0f)
 
             return if (plate == null) {
                 DetectionResult.Partial(faces + plates, listOf(DetectionType.LICENSE_PLATE))
