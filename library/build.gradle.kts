@@ -4,7 +4,7 @@ plugins {
     id("com.vanniktech.maven.publish")
 }
 
-val libraryVersion = "0.1.0"
+val libraryVersion = "0.1.2"
 
 android {
     namespace = "org.commons.ml"
